@@ -1,0 +1,17 @@
+services:
+  lpr_service:
+    # build: .
+    image: lpr_service-lpr_service:latest 
+    container_name: lpr_service
+    restart: unless-stopped
+
+    network_mode: "host"
+    volumes:
+      - ./license:/app/license
+      - ./logs:/app/logs
+      - ./models:/app/models
+      - ./outputs:/app/outputs
+      - ./videos:/app/videos
+
+    env_file:
+      - .env

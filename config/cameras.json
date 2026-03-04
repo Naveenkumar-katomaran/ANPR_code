@@ -1,0 +1,52 @@
+{
+    "video/test1.mp4": {
+        "line": {
+            "x1": 224,
+            "y1": 261,
+            "x2": 1265,
+            "y2": 286
+        },
+        "frame_width": 1280,
+        "frame_height": 720
+    },
+    "video/test2.mp4": {
+        "line": {
+            "x1": 504,
+            "y1": 942,
+            "x2": 3741,
+            "y2": 744
+        },
+        "frame_width": 3840,
+        "frame_height": 2160
+    },
+    "rtsp://192.168.0.124:8554/stream2": {
+        "line": {
+            "x1": 609,
+            "y1": 873,
+            "x2": 3783,
+            "y2": 747
+        },
+        "frame_width": 3840,
+        "frame_height": 2160
+    },
+    "rtsp://192.168.0.124:8554/stream1": {
+        "line": {
+            "x1": 291,
+            "y1": 262,
+            "x2": 1186,
+            "y2": 276
+        },
+        "frame_width": 1280,
+        "frame_height": 720
+    },
+    "video/clips/clip7.mp4": {
+        "line": {
+            "x1": 248,
+            "y1": 273,
+            "x2": 1159,
+            "y2": 297
+        },
+        "frame_width": 1280,
+        "frame_height": 720
+    }
+}

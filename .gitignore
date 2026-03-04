@@ -1,0 +1,13 @@
+app/detection/__pycache__
+app/lpr/__pycache__
+__pycache__
+app/__pycache__
+logs/
+models/
+outputs/
+videos/
+video/
+*.log
+*.h5
+*.pt
+.env

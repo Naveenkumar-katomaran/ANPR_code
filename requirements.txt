@@ -1,0 +1,18 @@
+fastapi
+uvicorn
+python-dotenv
+ultralytics
+opencv-python-headless
+numpy
+requests
+pytz
+cryptography
+pyinstaller
+tkcalendar
+typing_extensions
+
+
+
+# git remote add origin https://github.com/Naveenkumar-katomaran/ANPR_code.git
+# git branch -M main
+# git push -u origin main
