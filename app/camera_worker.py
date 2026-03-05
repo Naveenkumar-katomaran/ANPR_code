@@ -14,10 +14,10 @@ from app.config import *
 from app.config import load_camera_line
 from app.detection.vehicle_detector import VehicleDetector
 from app.detection.plate_detector import PlateDetector
-from app.detection.ocr import OCR
+from app.detection.ocr_manager import OCRManager
 from app.duplicate_cache import DuplicateCache
 from app.api_sender import APISender
-from app.utils import safe_crop
+from app.utils import safe_crop, open_capture
 from app.lpr.postprocess import choose_best_plate
 
 
@@ -46,74 +46,7 @@ def calculate_iou(boxA, boxB):
 
 
 
-def open_capture(RTSP_URL):
-    logging.info(f"[RTSP] Attempting to open stream: {RTSP_URL}")
-
-    # ---------- FFmpeg low-latency options (ffplay equivalent) ----------
-    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
-        "rtsp_transport;tcp|"
-        # "fflags;nobuffer|"
-        # "flags;low_delay|"
-        # "analyzeduration;0|"
-        # "probesize;32"
-    )
-
-    # ---------- Local webcam fallback ----------
-    if RTSP_URL in ["0", None, ""]:
-        logging.info("[RTSP] Opening local webcam (0)")
-        cap = cv2.VideoCapture(0)
-        return cap if cap.isOpened() else None
-
-    # ---------- HTTP / recordings ----------
-    if RTSP_URL.startswith(("http://", "https://")) or ("recordings" in RTSP_URL):
-        logging.info("[RTSP] Opening HTTP/HTTPS stream")
-        cap = cv2.VideoCapture(RTSP_URL, cv2.CAP_FFMPEG)
-        return cap if cap.isOpened() else None
-
-    url = RTSP_URL
-    cap = None
-
-    # ---------- Try FFmpeg backend (3 attempts) ----------
-    for attempt in range(1, 4):
-        logging.info(f"[RTSP] Open attempt {attempt}/3 using FFmpeg backend...")
-        cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
-
-        if cap.isOpened():
-            break
-
-        logging.warning("[RTSP] FFmpeg backend failed, retrying...")
-        cap.release()
-        time.sleep(2)
-
-    # ---------- Fallback ----------
-    if not cap or not cap.isOpened():
-        logging.warning("[RTSP] Falling back to CAP_ANY backend...")
-        cap = cv2.VideoCapture(url, cv2.CAP_ANY)
-
-    if not cap.isOpened():
-        logging.error("[RTSP] FAILED to open RTSP stream with OpenCV.")
-        cap.release()
-        return None
-
-    # ---------- Low-latency tuning ----------
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-
-    # Optional timeout support (depends on OpenCV build)
-    try:
-        cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10000)
-        cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 10000)
-    except Exception as e:
-        logging.debug(f"[RTSP] Timeout props not supported: {e}")
-
-    # ---------- Stream info ----------
-    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    fps_str = f"{fps:.1f}" if fps and fps > 0 else "unknown"
-
-    logging.info(f"[RTSP] SUCCESS! Stream opened: {w}x{h} @ {fps_str} FPS")
-
-    return cap
+# removed local open_capture, now in utils.py
 
 
 # =====================================================
@@ -126,19 +59,24 @@ class CameraWorker:
         logging.info("[WORKER] Initializing CameraWorker")
 
         self.cap = open_capture(RTSP_URL)
-        if not self.cap.isOpened():
+        if not self.cap or not self.cap.isOpened():
             logging.error("[RTSP] Failed to open stream")
 
-        # device = "cuda" if torch.cuda.is_available() else "cpu"
         device = DEVICE
         logging.info(f"[DEVICE] Using {device}")
 
-        self.vehicle = VehicleDetector("models/yolov8n.pt")
+        # Optimization: Set torch threads if running on CPU
+        if device == "cpu":
+            torch.set_num_threads(os.cpu_count() or 4)
+            logging.info(f"[CPU OPTIMIZATION] Set torch threads to {os.cpu_count()}")
+
+        self.vehicle = VehicleDetector("models/yolov8n.pt", device)
         self.plate = PlateDetector(
             "models/lp_detection/anprox_oloyin_tribus_minima.cfg",
-            "models/lp_detection/anprox_oloyin_tribus_minima.weights"
+            "models/lp_detection/anprox_oloyin_tribus_minima.weights",
+            device
         )
-        self.ocr = OCR("models/ocr/best.pt", device)
+        self.ocr_manager = OCRManager("models/ocr/best.pt", device)
 
         self.dup_cache = DuplicateCache(DUPLICATE_WINDOW_SECONDS)
         self.sender = APISender(API_URL, API_KEY, CAMERA_ID)
@@ -158,8 +96,8 @@ class CameraWorker:
         os.makedirs("outputs/proofs", exist_ok=True)
 
         # ---- Direction line ----
-        # load_camera_line() calls sys.exit(1) if not configured — intentional
         self.line = load_camera_line(RTSP_URL)   # (x1, y1, x2, y2) native coords
+        self._last_scale = 1.0 # Default scale
         logging.info(
             f"[DIRECTION] mode={DIRECTION}  "
             f"line=({self.line[0]},{self.line[1]})-({self.line[2]},{self.line[3]})"
@@ -222,8 +160,8 @@ class CameraWorker:
         session["bbox"] = bbox
 
     def _save_plate_image(self, sid, plate_crop, vehicle_crop=None):
-        """Save a plate crop image to the session's temp folder on disk.
-        Stops saving once MAX_BATCH_IMAGES is reached (CUDA OOM guard).
+        """Buffer plate crops in memory for the session.
+        Stops buffering once MAX_BATCH_IMAGES is reached.
         """
         session = self.sessions.get(sid)
         if not session:
@@ -232,31 +170,21 @@ class CameraWorker:
         # ---- Cap check ----
         if session["frame_count"] >= MAX_BATCH_IMAGES:
             if session["frame_count"] == MAX_BATCH_IMAGES:
-                # Log only once when cap is first hit
-                logging.info(
-                    f"[CAP REACHED]   session={sid[:8]}  limit={MAX_BATCH_IMAGES}  "
-                    f"further crops discarded to prevent OOM"
-                )
+                logging.info(f"[CAP REACHED] session={sid[:8]} limit={MAX_BATCH_IMAGES}")
             return
 
-        temp_dir = session["temp_dir"]
-        os.makedirs(temp_dir, exist_ok=True)
-
+        if "crops" not in session:
+            session["crops"] = []
+        
         session["frame_count"] += 1
-        
-        # Save plate crop
-        img_path = os.path.join(temp_dir, f"frame_{session['frame_count']:04d}.jpg")
-        cv2.imwrite(img_path, plate_crop)
-        
-        # Save vehicle crop (proof) if enabled
-        if STORE_SESSION_PROOF and vehicle_crop is not None:
-            veh_path = os.path.join(temp_dir, f"veh_{session['frame_count']:04d}.jpg")
-            cv2.imwrite(veh_path, vehicle_crop)
+        # Store in memory
+        session["crops"].append({
+            "plate": plate_crop,
+            "vehicle": vehicle_crop,
+            "timestamp": time.time()
+        })
 
-        logging.debug(
-            f"[PLATE SAVED]   session={sid[:8]}  frame=#{session['frame_count']:04d}  "
-            f"size={plate_crop.shape[1]}x{plate_crop.shape[0]}"
-        )
+        logging.debug(f"[PLATE BUFFERED] session={sid[:8]} frame=#{session['frame_count']:04d}")
 
     def _save_session_to_disk(self, session, status="finalized", discard_reason=None, plate_path=None, duplicate_blocked=False):
         try:
@@ -311,98 +239,48 @@ class CameraWorker:
                 shutil.rmtree(temp_dir, ignore_errors=True)
                 logging.debug(f"[TEMP CLEANED] {temp_dir}")
 
-        # ---- Direction gate (skip before loading images) ----
+        # ---- Direction gate ----
         if DIRECTION != "BOTH":
             crossed = session.get("direction_crossed")
             if crossed != DIRECTION:
                 reason = f"wrong_direction (crossed={crossed}, required={DIRECTION})"
-                logging.info(
-                    f"[DIRECTION DISCARD] session={sid[:8]}  {reason}"
-                )
+                logging.info(f"[DIRECTION DISCARD] session={sid[:8]} {reason}")
                 self._save_session_to_disk(session, status="discarded", discard_reason=reason)
                 _cleanup()
                 del self.sessions[sid]
                 return
 
-        # ---- Minimum frames check ----
-        image_files = sorted(glob.glob(os.path.join(temp_dir, "frame_*.jpg")))
+        # ---- Minimum candidates check (instead of frames) ----
+        with self.ocr_manager.lock:
+            candidates = session.get("candidates", [])
+            # Deep copy or at least copy the list so we can work on it safely
+            candidates = list(candidates)
 
-        if len(image_files) < MIN_FRAMES_BEFORE_DECISION:
-            reason = "too_few_frames"
+        if len(candidates) < MIN_FRAMES_BEFORE_DECISION:
+            reason = "too_few_ocr_results"
             logging.info(
-                f"[SKIP]  session={sid[:8]}  reason={reason}  "
-                f"have={len(image_files)}  need>={MIN_FRAMES_BEFORE_DECISION}"
+                f"[SKIP] session={sid[:8]} reason={reason} "
+                f"have={len(candidates)} need>={MIN_FRAMES_BEFORE_DECISION}"
             )
             self._save_session_to_disk(session, status="skipped", discard_reason=reason)
             _cleanup()
             del self.sessions[sid]
             return
 
-        # ---- Load images from disk ----
-        images = []
-        for img_path in image_files:
-            img = cv2.imread(img_path)
-            if img is not None:
-                images.append((img_path, img))
-
-        if not images:
-            reason = "no_readable_images"
-            logging.warning(f"[FINALIZE] No readable images in {temp_dir}")
-            self._save_session_to_disk(session, status="discarded", discard_reason=reason)
-            _cleanup()
-            del self.sessions[sid]
-            return
-
-        # ---- Batch OCR ----
-        ocr_t0 = time.time()
-        logging.info(
-            f"[BATCH OCR ▶]  session={sid[:8]}  images={len(images)}  "
-            f"duration={session['last_seen'] - session['start_time']:.1f}s"
-        )
-        batch_results = self.ocr.read_batch_with_confidence([img for _, img in images])
-        ocr_elapsed = time.time() - ocr_t0
-
-        # ---- Build candidates from batch results ----
-        all_results_count = sum(1 for t, c in batch_results if t)
-        candidates = [
-            {"text": text, "conf": conf}
-            for text, conf in batch_results
-            if text and conf >= MIN_OCR_CONFIDENCE
-        ]
-
-        logging.info(
-            f"[BATCH OCR ◀]  session={sid[:8]}  time={ocr_elapsed:.2f}s  "
-            f"total_reads={all_results_count}  valid_reads={len(candidates)}"
-        )
-
-        # Store candidates in session for JSON output
-        session["candidates"] = candidates
-
-        if not candidates:
-            reason = "no_valid_ocr_above_threshold"
-            logging.info(
-                f"[DISCARD] session={sid[:8]}  reason={reason}  "
-                f"min_conf={MIN_OCR_CONFIDENCE}"
-            )
-            self._save_session_to_disk(session, status="discarded", discard_reason=reason)
-            _cleanup()
-            del self.sessions[sid]
-            return
-
-        # ---- Pick best plate ----
+        # ---- Pick best plate from accumulated candidates ----
         plate, conf = choose_best_plate(candidates)
 
-        # Summarise what the OCR saw
+        # Summarize results
         from collections import Counter
         text_freq = Counter(c["text"] for c in candidates)
         logging.info(
-            f"[OCR SUMMARY]  session={sid[:8]}  readings={text_freq}  "
-            f"winner='{plate}'  score={conf:.2f}"
+            f"[OCR SUMMARY] session={sid[:8]} readings={text_freq} "
+            f"winner='{plate}' score={conf:.2f}"
         )
 
         if not plate:
             reason = "no_valid_plate_pattern"
-            logging.info(f"[DISCARD] session={sid[:8]}  reason={reason}")
+            logging.info(f"[DISCARD] session={sid[:8]} reason={reason}")
             self._save_session_to_disk(session, status="discarded", discard_reason=reason)
             _cleanup()
             del self.sessions[sid]
@@ -410,57 +288,38 @@ class CameraWorker:
 
         # ---- Duplicate check ----
         if self.dup_cache.is_duplicate(plate):
-            logging.info(
-                f"[DUPLICATE]    plate={plate}  session={sid[:8]}  "
-                f"→ blocked within {DUPLICATE_WINDOW_SECONDS}s window"
-            )
+            logging.info(f"[DUPLICATE] plate={plate} session={sid[:8]} → blocked")
             self._save_session_to_disk(session, status="duplicate", discard_reason="duplicate_blocked", duplicate_blocked=True)
             _cleanup()
             del self.sessions[sid]
             return
 
-        # ---- Save best plate image (highest confidence result) ----
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        plate_path = f"outputs/plates/{plate}_{timestamp}.jpg"
-
-        best_idx = max(
-            range(len(batch_results)),
-            key=lambda i: batch_results[i][1]
-        )
-        cv2.imwrite(plate_path, images[best_idx][1])
-
-        # Store best image path in session for JSON output
-        session["best_plate_image_path"] = plate_path
-
-        # Handle session proof if enabled
-        if STORE_SESSION_PROOF:
-            best_img_path = images[best_idx][0]  # Full path: temp/vehicle_XX/frame_NNNN.jpg
-            best_veh_path = best_img_path.replace("frame_", "veh_")
-            
-            if os.path.exists(best_veh_path):
-                proof_path = f"outputs/proofs/proof_{sid[:8]}_{timestamp}.jpg"
-                try:
-                    shutil.copy(best_veh_path, proof_path)
-                    session["session_proof_path"] = proof_path
-                    logging.info(f"[PROOF SAVED]   session={sid[:8]}  path={proof_path}")
-                except Exception as e:
-                    logging.error(f"[PROOF ERROR]   Failed to copy {best_veh_path} to {proof_path}: {e}")
-            else:
-                logging.debug(f"[PROOF SKIP]    Vehicle crop not found: {best_veh_path}")
-        else:
-            logging.debug(f"[PROOF SKIP]    STORE_SESSION_PROOF is False")
-
-        logging.info(
-            f"[✅ FINALIZED]  plate={plate}  score={conf:.2f}  "
-            f"frames={len(images)}  session={sid[:8]}  image={plate_path}"
-        )
-
         session["best_plate"] = plate
         session["best_conf"] = conf
-        self.sender.send_async(plate, plate_path)
+        logging.info(f"[✅ FINALIZED] plate={plate} score={conf:.2f} session={sid[:8]}")
+        
+        # Save only the best results to disk to reduce I/O
+        crops = session.get("crops", [])
+        plate_path = None
+        if crops:
+            # For now, we take the first buffered crop. In the future, we could pick sharpest.
+            best_item = crops[0] 
+            
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            plate_name = f"{plate}_{timestamp}.jpg"
+            plate_path = os.path.join("outputs/plates", plate_name)
+            cv2.imwrite(plate_path, best_item["plate"])
+            session["best_plate_image_path"] = plate_path
+            
+            if STORE_SESSION_PROOF and best_item["vehicle"] is not None:
+                proof_name = f"proof_{sid[:8]}_{timestamp}.jpg"
+                proof_path = os.path.join("outputs/proofs", proof_name)
+                cv2.imwrite(proof_path, best_item["vehicle"])
+                session["session_proof_path"] = proof_path
 
-        session["sent"] = True
-        self._save_session_to_disk(session, plate_path=plate_path)
+        # Send to API
+        self.sender.send_async(plate, session.get("best_plate_image_path"))
+        self._save_session_to_disk(session, status="finalized", plate_path=plate_path)
 
         _cleanup()
         del self.sessions[sid]
@@ -571,19 +430,26 @@ class CameraWorker:
 
         # ---- Virtual crossing line + ENTRY/EXIT arrows ----
         if self.line:
+            # dlx/dly are display (detector frame) coordinates.
+            # self.line is in NATIVE coords.
+            s = getattr(self, '_last_scale', 1.0)
+            
             lx1, ly1, lx2, ly2 = self.line
-            cv2.line(display, (lx1, ly1), (lx2, ly2), (255, 255, 255), 2, cv2.LINE_AA)
-            cv2.circle(display, (lx1, ly1), 6, YELLOW, -1)
-            cv2.circle(display, (lx2, ly2), 6, YELLOW, -1)
+            dlx1, dly1 = int(lx1 * s), int(ly1 * s)
+            dlx2, dly2 = int(lx2 * s), int(ly2 * s)
+
+            cv2.line(display, (dlx1, dly1), (dlx2, dly2), (255, 255, 255), 2, cv2.LINE_AA)
+            cv2.circle(display, (dlx1, dly1), 6, YELLOW, -1)
+            cv2.circle(display, (dlx2, dly2), 6, YELLOW, -1)
 
             # Compute perpendicular direction arrows
-            dx, dy = lx2 - lx1, ly2 - ly1
+            dx, dy = dlx2 - dlx1, dly2 - dly1
             length = math.hypot(dx, dy)
             if length > 0:
                 ux, uy = dx / length, dy / length
                 entry_vec = (-uy, ux)    # left of P1→P2
                 exit_vec  = ( uy, -ux)  # right of P1→P2
-                mid = ((lx1 + lx2) // 2, (ly1 + ly2) // 2)
+                mid = ((dlx1 + dlx2) // 2, (dly1 + dly2) // 2)
                 arrow_len = min(80, int(length * 0.15))
 
                 # Entry arrow (green)
@@ -661,93 +527,126 @@ class CameraWorker:
                 fps_count   = 0
                 fps_timer   = now
 
-            # Vehicle detection on FULL FRAME
-            results = self.vehicle.detect(original_frame)
+            # ---- Resize for detection & display efficiency ----
+            h_orig, w_orig = original_frame.shape[:2]
+            scale = 1.0
+            if w_orig > RESIZE_WIDTH:
+                scale = RESIZE_WIDTH / w_orig
+                detector_frame = cv2.resize(original_frame, (RESIZE_WIDTH, int(h_orig * scale)))
+            else:
+                detector_frame = original_frame
+            
+            self._last_scale = scale # Store for visualization
+
+            # Vehicle detection on DETECTOR FRAME (faster)
+            results = self.vehicle.detect(detector_frame)
 
             vehicle_count      = 0
             plate_count        = 0
             vehicle_detections = []   # for display
 
             if results and len(results[0].boxes) > 0:
-
                 vehicle_boxes = results[0].boxes[:MAX_VEHICLES_PER_FRAME]
                 vehicle_count = len(vehicle_boxes)
 
                 for box in vehicle_boxes:
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    bbox = (x1, y1, x2, y2)
+                    # Bbox in detector_frame coordinates
+                    sx1, sy1, sx2, sy2 = map(int, box.xyxy[0])
+                    
+                    # Scale back to original for high-res crop
+                    x1 = int(sx1 / scale)
+                    y1 = int(sy1 / scale)
+                    x2 = int(sx2 / scale)
+                    y2 = int(sy2 / scale)
+                    bbox_orig = (x1, y1, x2, y2)
 
-                    vehicle_crop = safe_crop(original_frame, bbox)
-                    if vehicle_crop is None:
-                        continue
+                    vehicle_crop = safe_crop(original_frame, bbox_orig)
+                    if vehicle_crop is None: continue
 
-                    # Plate detection
-                    plates = self.plate.detect(vehicle_crop)
+                    # Define native crops coords regardless of condition for safety
+                    nx1, ny1, nx2, ny2 = x1, y1, x2, y2
 
-                    # Collect absolute plate coords for display
-                    abs_plate_boxes = []
-                    if plates:
-                        plate_count += len(plates)
-                        logging.debug(
-                            f"[PLATE DETECT]  vehicle@({x1},{y1})-({x2},{y2})  "
-                            f"{len(plates)} plate(s) found"
-                        )
-                        for px1, py1, px2, py2, _conf in plates:
-                            # Convert vehicle-relative coords → full-frame coords
-                            abs_plate_boxes.append((
-                                x1 + px1, y1 + py1,
-                                x1 + px2, y1 + py2
-                            ))
+                    # Match / create session (using original coords for consistency)
+                    sid = self._match_session(bbox_orig)
+                    if not sid:
+                        sid = self._create_session(bbox_orig)
+                    else:
+                        self._update_session(sid, bbox_orig)
 
-                    # Match / create session
-                    sid = self._match_session(bbox)
-                    if sid is None:
-                        sid = self._create_session(bbox)
-                    self._update_session(sid, bbox)
+                    session = self.sessions[sid]
 
                     # ---- Centroid line-crossing detection ----
-                    session = self.sessions[sid]
                     lx1, ly1, lx2, ly2 = self.line
-                    cx = (x1 + x2) // 2
-                    cy = (y1 + y2) // 2
-
+                    cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+                    
                     # Signed cross product: tells which side of the line the centroid is on
                     cross = (lx2 - lx1) * (cy - ly1) - (ly2 - ly1) * (cx - lx1)
                     curr_side = 1 if cross > 0 else (-1 if cross < 0 else 0)
-                    prev_side = session["last_side"]
+                    prev_side = session.get("last_side")
 
-                    if (prev_side is not None
-                            and prev_side != 0
-                            and curr_side != 0
-                            and prev_side != curr_side):
-                        # Side changed → line crossed
+                    if (prev_side is not None and prev_side != 0 and curr_side != 0 and prev_side != curr_side):
+                        # Side changed -> line crossed
                         crossed = "ENTRY" if prev_side < 0 and curr_side > 0 else "EXIT"
-                        session["direction_crossed"] = crossed
-                        logging.info(
-                            f"[LINE CROSS]   session={sid[:8]}  direction={crossed}  "
-                            f"centroid=({cx},{cy})"
-                        )
-
+                        if session.get("direction_crossed") is None:
+                            session["direction_crossed"] = crossed
+                            logging.info(f"[LINE CROSS] session={sid[:8]} direction={crossed} centroid=({cx},{cy})")
+                    
                     session["last_side"] = curr_side
 
-                    for px1, py1, px2, py2, _conf in plates:
-                        plate_crop = safe_crop(vehicle_crop, (px1, py1, px2, py2))
-                        if plate_crop is None:
-                            continue
+                    # ---- Production-Level Optimization ----
+                    # - Draft Optimization Plan
+                    # - Optimize I/O (Eliminate per-frame disk writes for crops)
+                    # - Dynamic Inference Control (Skip plate detection on untracked/distant vehicles)
+                    # - Batching in OCRManager worker
+                    # - Main Loop Refactor (Decouple Display/UI from Processing)
+                    # Plate detection is expensive. Skip if we have enough candidates
+                    # or if the vehicle is not in a priority state.
+                    with self.ocr_manager.lock:
+                        candidates_count = len(session.get("candidates", []))
+                    
+                    should_detect_plate = False
+                    if candidates_count < 20:
+                        # Detect every N frames to save cycles
+                        if decoded_frames % (FRAME_SKIP + 1) == 0:
+                            should_detect_plate = True
 
-                        plate_crop = cv2.resize(
-                            plate_crop,
-                            None,
-                            fx=2.0,
-                            fy=2.0,
-                            interpolation=cv2.INTER_CUBIC
+                    if should_detect_plate:
+                        # Native resolution coordinates for OCR cropping
+                        nx1, ny1, nx2, ny2 = (
+                            int(sx1 / scale), int(sy1 / scale),
+                            int(sx2 / scale), int(sy2 / scale)
                         )
-                        self._save_plate_image(sid, plate_crop, vehicle_crop)
+                        vehicle_crop_native = safe_crop(original_frame, (nx1, ny1, nx2, ny2))
+                        
+                        if vehicle_crop_native is not None:
+                            plates_native = self.plate.detect(vehicle_crop_native)
+                            for px1, py1, px2, py2, _pconf in plates_native:
+                                plate_crop = safe_crop(vehicle_crop_native, (px1, py1, px2, py2))
+                                if plate_crop is None: continue
+                                
+                                # Higher resolution for OCR
+                                plate_crop = cv2.resize(plate_crop, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+                                
+                                # Buffer the crop (in memory) and enqueue for OCR
+                                self._save_plate_image(sid, plate_crop, vehicle_crop_native)
+                                self.ocr_manager.enqueue_plate(session, plate_crop)
+                    
+                    det_plates = []
+                    if should_detect_plate and 'plates_native' in locals():
+                        for px1, py1, px2, py2, _pconf in plates_native:
+                            # Map native plate coords -> detector_frame coords for display
+                            # Natives are relative to the vehicle_crop_native
+                            # px1 relative to nx1
+                            det_px1 = int((nx1 + px1) * scale)
+                            det_py1 = int((ny1 + py1) * scale)
+                            det_px2 = int((nx1 + px2) * scale)
+                            det_py2 = int((ny1 + py2) * scale)
+                            det_plates.append((det_px1, det_py1, det_px2, det_py2))
 
                     vehicle_detections.append({
-                        'bbox':   bbox,
-                        'sid':    sid,
-                        'plates': abs_plate_boxes,
+                        'bbox': (sx1, sy1, sx2, sy2),
+                        'sid': sid,
+                        'plates': det_plates,
                     })
 
             # Log frame summary every 10 decoded frames
@@ -763,7 +662,7 @@ class CameraWorker:
             # ---- Live inference window ----
             if SHOW_LPR_WINDOW:
                 display_frame = self._draw_inference_frame(
-                    original_frame, vehicle_detections
+                    detector_frame, vehicle_detections
                 )
 
                 # FPS badge (bottom-left)
@@ -788,6 +687,7 @@ class CameraWorker:
             self._finalize_session(sid)
 
         self.cap.release()
+        self.ocr_manager.stop() # Shut down background thread
         cv2.destroyAllWindows()
         logging.info("[WORKER] Stopped")
 

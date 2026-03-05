@@ -6,8 +6,8 @@ import torch
 VEHICLE_CLASSES = [2, 3, 5, 7]
 
 class VehicleDetector:
-    def __init__(self, model_path):
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+    def __init__(self, model_path, device="cpu"):
+        self.device = device
         self.model = YOLO(model_path)
         self.model.to(self.device)
 

@@ -11,10 +11,10 @@
     },
     "video/test2.mp4": {
         "line": {
-            "x1": 504,
-            "y1": 942,
-            "x2": 3741,
-            "y2": 744
+            "x1": 783,
+            "y1": 945,
+            "x2": 3804,
+            "y2": 879
         },
         "frame_width": 3840,
         "frame_height": 2160
@@ -48,5 +48,25 @@
         },
         "frame_width": 1280,
         "frame_height": 720
+    },
+    "videos/1_clip_01.mp4": {
+        "line": {
+            "x1": 762,
+            "y1": 945,
+            "x2": 3582,
+            "y2": 852
+        },
+        "frame_width": 3840,
+        "frame_height": 2160
+    },
+    "videos/1_clip_03.mp4": {
+        "line": {
+            "x1": 774,
+            "y1": 882,
+            "x2": 3621,
+            "y2": 717
+        },
+        "frame_width": 3840,
+        "frame_height": 2160
     }
 }
