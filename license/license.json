@@ -1,11 +1,11 @@
 {
   "payload": {
     "license_id": "kato-001",
-    "valid_days": 5,
-    "issued_at": "2026-02-28T06:46:00Z",
-    "expires_at": "2026-03-05T18:30:00Z",
+    "valid_days": 365,
+    "issued_at": "2026-02-28T07:20:00Z",
+    "expires_at": "2027-02-28T18:30:00Z",
     "user_name": "User",
     "email": "user@katomaran.com"
   },
-  "signature": "cL8ijyVixc/EgvamoEKJcGlUNnYpLHUwhl4pj5OaugSeP+JqiGOEe+E9WNbDb9cIjL1GuOtF1pUX5f8bdzTbZscDXXqYXVIs+uusy6MdVdGh3WrW3ISqLwglM88ANCMKpZJ92Us3Ngd9gcSojukYSJOO2U4Jqc67CZ92vhhU6E9sldLqWRYUatqyoyA0ut4+wXYMMATdLz7A9IUz4Z9JYXR/l+9SxiavgjyqM8CfOwE38PVqtE+x/WGXXqdNX6LP6wI5qRh3Hol6zbp66sJ6KO8chPa6wBxfEB+AsYTcORLXLUdThJFvRuBmBEUGs0kbuMNipJtglRkHFIIkBMN02g=="
+  "signature": "q7WfFLGThFnnB3loPSHbBlw7toTezvSH0qGg1Xtl8invUYp44PHlLp3rlRFDf73GiTT85XvRio3Gfwf3qmhIzWAYkXTpsITBDCVyluYe0xpUhcTJFrO8suJrVxzLRN57G5UrhHxBab97aPLJf4sjys+djOtf89pEpvPtEylHZhtwpuBc6LTnZqwhk9AnwfOnUsDCpz3jWpdN1PWkFfPFncPNSxQGvDu7MH1RKHad4gFUMzdRU9dnzLitWXrGWPDNdzhQ5WGXwciEHTprCIaKB3xmBJvXGYCcJvF/ohelqBxKnPyg01BPEnXmoGdDF802zkT/RwxHeGb6biU1Mj+0Rw=="
 }

@@ -171,7 +171,7 @@ def choose_best_plate(candidates: List[dict]) -> Tuple[Optional[str], float]:
     # 5. Final repair & validation
     final_plate = raw_plate.replace('?', '')
     
-    if is_valid_format(final_plate):
+    if is_valid_format(final_plate) and VALIDATE_INDIAN_PLATE:
         # 6. Confidence Scoring
         avg_conf = total_weights / 11.0
         
@@ -184,6 +184,9 @@ def choose_best_plate(candidates: List[dict]) -> Tuple[Optional[str], float]:
         if q_count > 0:
             avg_conf *= (1.0 - (q_count * 0.15))
             
+        return final_plate, avg_conf
+    else:
+        avg_conf = total_weights / 11.0
         return final_plate, avg_conf
 
     logging.info(f"[POSTPROCESS] Rejected: raw={raw_plate} final={final_plate} valid={is_valid_format(final_plate)}")

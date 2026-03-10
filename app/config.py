@@ -48,6 +48,11 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 DEVICE = os.getenv("DEVICE", "cpu").lower()  # "cpu" or "cuda"
 STORE_SESSION_PROOF = os.getenv("STORE_SESSION_PROOF", "True").lower() in ["1", "true", "yes"]
 
+
+
+
+VALIDATE_INDIAN_PLATE = os.getenv("VALIDATE_INDIAN_PLATE", "True").lower() in ["1", "true", "yes"]
+
 PORT = int(os.getenv("PORT", 7000))
 
 # -----------------------------
@@ -71,7 +76,9 @@ def load_camera_line(source_url: str):
     """
     Load the virtual crossing line for *source_url* from config/cameras.json.
 
-    Returns (x1, y1, x2, y2) as integers in native-frame coordinates.
+    Returns (x1, y1, x2, y2, native_w, native_h) where the coordinates are
+    in the native frame resolution that was used when the line was drawn.
+    The caller is responsible for scaling to the actual capture resolution.
 
     Raises SystemExit(1) if the file is missing or the source has no entry,
     so the worker refuses to start with a clear log message.
@@ -95,9 +102,12 @@ def load_camera_line(source_url: str):
 
     entry = data[source_url]
     ln = entry["line"]
-    coords = (int(ln["x1"]), int(ln["y1"]), int(ln["x2"]), int(ln["y2"]))
+    native_w = int(entry.get("frame_width",  ln["x2"]))   # fallback: use x2 as width estimate
+    native_h = int(entry.get("frame_height", ln["y1"]))   # fallback: use y1 as height estimate
+    coords = (int(ln["x1"]), int(ln["y1"]), int(ln["x2"]), int(ln["y2"]), native_w, native_h)
     print(
         f"[CONFIG] Line loaded for '{source_url}': "
-        f"P1=({coords[0]},{coords[1]})  P2=({coords[2]},{coords[3]})"
+        f"P1=({coords[0]},{coords[1]})  P2=({coords[2]},{coords[3]})  "
+        f"native_res={native_w}×{native_h}"
     )
     return coords

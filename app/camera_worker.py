@@ -12,7 +12,7 @@ import torch
 
 from app.config import *
 from app.config import load_camera_line
-from app.detection.vehicle_detector import VehicleDetector
+# from app.detection.vehicle_detector import VehicleDetector
 from app.detection.plate_detector import PlateDetector
 from app.detection.ocr_manager import OCRManager
 from app.duplicate_cache import DuplicateCache
@@ -70,10 +70,10 @@ class CameraWorker:
             torch.set_num_threads(os.cpu_count() or 4)
             logging.info(f"[CPU OPTIMIZATION] Set torch threads to {os.cpu_count()}")
 
-        self.vehicle = VehicleDetector("models/yolov8n.pt", device)
+        # self.vehicle = VehicleDetector("models/yolov8n.pt", device)
         self.plate = PlateDetector(
-            "models/lp_detection/anprox_oloyin_tribus_minima.cfg",
-            "models/lp_detection/anprox_oloyin_tribus_minima.weights",
+            None,
+            "models/plate_detection/plate_detection_model_v2.pt",
             device
         )
         self.ocr_manager = OCRManager("models/ocr/best.pt", device)
@@ -96,11 +96,24 @@ class CameraWorker:
         os.makedirs("outputs/proofs", exist_ok=True)
 
         # ---- Direction line ----
-        self.line = load_camera_line(RTSP_URL)   # (x1, y1, x2, y2) native coords
-        self._last_scale = 1.0 # Default scale
+        # load_camera_line returns native coords + the resolution they were drawn at
+        x1, y1, x2, y2, native_w, native_h = load_camera_line(RTSP_URL)
+
+        # Scale native line coords → actual capture resolution
+        actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))  or native_w
+        actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or native_h
+        sx = actual_w / native_w if native_w else 1.0
+        sy = actual_h / native_h if native_h else 1.0
+
+        self.line = (
+            int(x1 * sx), int(y1 * sy),
+            int(x2 * sx), int(y2 * sy),
+        )
+        self._last_scale = 1.0  # Default scale (updated per-frame during resize)
         logging.info(
             f"[DIRECTION] mode={DIRECTION}  "
-            f"line=({self.line[0]},{self.line[1]})-({self.line[2]},{self.line[3]})"
+            f"native_line=({x1},{y1})-({x2},{y2}) @ {native_w}×{native_h}  "
+            f"→ scaled_line=({self.line[0]},{self.line[1]})-({self.line[2]},{self.line[3]}) @ {actual_w}×{actual_h}"
         )
 
     # =====================================================
@@ -140,7 +153,7 @@ class CameraWorker:
 
         for sid, session in self.sessions.items():
             iou = calculate_iou(bbox, session["bbox"])
-            if iou > 0.4 and iou > best_iou:
+            if iou > 0.1 and iou > best_iou:
                 best_iou = iou
                 best_match = sid
 
@@ -352,15 +365,15 @@ class CameraWorker:
     # DRAW INFERENCE WINDOW
     # =====================================================
 
-    def _draw_inference_frame(self, frame, vehicle_detections):
+    def _draw_inference_frame(self, frame, plate_detections):
         """
         Render a rich annotated copy of the frame for the live display.
 
-        vehicle_detections: list of dicts:
+        plate_detections: list of dicts:
             {
               'bbox': (x1,y1,x2,y2),
               'sid':  session_id or None,
-              'plates': [ (px1,py1,px2,py2, conf, abs_x1,abs_y1,abs_x2,abs_y2) ]
+              'conf': float
             }
         """
         display = frame.copy()
@@ -392,41 +405,34 @@ class CameraWorker:
                           bg_color, cv2.FILLED)
             cv2.putText(img, text, (x, y), FONT, font_scale, text_color, thickness, cv2.LINE_AA)
 
-        # ---- Draw each vehicle + plates ----
-        for det in vehicle_detections:
-            vx1, vy1, vx2, vy2 = det['bbox']
+        # ---- Draw each plate ----
+        for det in plate_detections:
+            px1, py1, px2, py2 = det['bbox']
             sid   = det.get('sid')
-            plates = det.get('plates', [])
+            conf  = det.get('conf', 0.0)
 
-            # Vehicle box
-            cv2.rectangle(display, (vx1, vy1), (vx2, vy2), COLOR_VEHICLE, THICK_MD)
+            # Plate box
+            cv2.rectangle(display, (px1, py1), (px2, py2), COLOR_PLATE, THICK_MD)
 
             # Centroid
-            cx = (vx1 + vx2) // 2
-            cy = (vy1 + vy2) // 2
-            cv2.circle(display, (cx, cy), 5, COLOR_CENTROID, -1)
+            cx = (px1 + px2) // 2
+            cy = (py1 + py2) // 2
+            cv2.circle(display, (cx, cy), 4, COLOR_CENTROID, -1)
 
-            # Session label — show direction crossing status
+            # Session label
             if sid and sid in self.sessions:
                 session  = self.sessions[sid]
                 sid_short = sid[:8]
                 frames   = session['frame_count']
                 best_txt = session.get('best_plate') or '—'
                 dir_txt  = session.get('direction_crossed') or '--'
-                label    = f"ID:{sid_short}  frm:{frames}  dir:{dir_txt}  plate:{best_txt}"
+                label    = f"ID:{sid_short} f:{frames} dir:{dir_txt} plt:{best_txt}"
             else:
-                label = "NEW"
+                label = f"PLATE {conf:.2f}"
 
-            _label(display, label, vx1, max(vy1 - 6, 14),
+            _label(display, label, px1, max(py1 - 6, 14),
                    font_scale=FONT_MD, thickness=THICK_SM,
-                   bg_color=(0, 120, 0))
-
-            # Plate boxes (absolute coords on full frame)
-            for plate_info in plates:
-                ax1, ay1, ax2, ay2 = plate_info
-                cv2.rectangle(display, (ax1, ay1), (ax2, ay2), COLOR_PLATE, THICK_MD)
-                _label(display, "PLATE", ax1, max(ay1 - 4, 12),
-                       font_scale=0.40, bg_color=(80, 120, 0))
+                   bg_color=(0, 100, 150))
 
         # ---- Virtual crossing line + ENTRY/EXIT arrows ----
         if self.line:
@@ -476,9 +482,8 @@ class CameraWorker:
         cv2.addWeighted(bar_bg, 0.75, display[:bar_h, :], 0.25, 0, display[:bar_h, :])
 
         active = len(self.sessions)
-        veh_n  = len(vehicle_detections)
-        plate_n = sum(len(d.get('plates', [])) for d in vehicle_detections)
-        stats = (f" LPR LIVE   vehicles:{veh_n}  plates:{plate_n}  "
+        plate_n = len(plate_detections)
+        stats = (f" LPR LIVE   plates:{plate_n}  "
                  f"sessions:{active}  direction:{DIRECTION}")
         cv2.putText(display, stats, (6, 24), FONT, FONT_MD,
                     (0, 255, 120), THICK_SM, cv2.LINE_AA)
@@ -492,202 +497,202 @@ class CameraWorker:
     def run(self):
         logging.info("[WORKER] Started — entering main frame loop")
 
-        frame_index   = 0
-        decoded_frames = 0
-        fps_timer     = time.time()
-        fps_count     = 0
-        fps_display   = 0.0
+        reconnect_delay = 5          # seconds; doubles on each failure, capped at 60
+        MAX_RECONNECT_DELAY = 60
 
-        while True:
-            # Grab frame only (no decode yet)
-            grabbed = self.cap.grab()
-            if not grabbed:
-                logging.warning("[WORKER] Stream ended or frame grab failed — exiting loop")
-                break
+        while True:                  # ← outer reconnect loop
+            frame_index    = 0
+            decoded_frames = 0
+            fps_timer      = time.time()
+            fps_count      = 0
+            fps_display    = 0.0
+            user_quit      = False
 
-            frame_index += 1
+            # ── inner frame loop ──────────────────────────────────────
+            while True:
+                # Grab frame only (no decode yet)
+                grabbed = self.cap.grab()
+                if not grabbed:
+                    logging.warning("[WORKER] Stream ended or frame grab failed — will reconnect")
+                    break                # exit inner loop → reconnect
 
-            # Frame skip
-            if frame_index % FRAME_SKIP != 0:
-                continue
+                frame_index += 1
 
-            # Decode frame only when needed
-            ret, frame = self.cap.retrieve()
-            if not ret:
-                continue
+                # Frame skip
+                if frame_index % FRAME_SKIP != 0:
+                    continue
 
-            decoded_frames += 1
-            fps_count      += 1
-            original_frame  = frame
+                # Decode frame only when needed
+                ret, frame = self.cap.retrieve()
+                if not ret:
+                    continue
 
-            # ---- FPS calculation (update every second) ----
-            now = time.time()
-            if now - fps_timer >= 1.0:
-                fps_display = fps_count / (now - fps_timer)
-                fps_count   = 0
-                fps_timer   = now
+                decoded_frames += 1
+                fps_count      += 1
+                original_frame  = frame
 
-            # ---- Resize for detection & display efficiency ----
-            h_orig, w_orig = original_frame.shape[:2]
-            scale = 1.0
-            if w_orig > RESIZE_WIDTH:
-                scale = RESIZE_WIDTH / w_orig
-                detector_frame = cv2.resize(original_frame, (RESIZE_WIDTH, int(h_orig * scale)))
-            else:
-                detector_frame = original_frame
-            
-            self._last_scale = scale # Store for visualization
+                # ---- FPS calculation (update every second) ----
+                now = time.time()
+                if now - fps_timer >= 1.0:
+                    fps_display = fps_count / (now - fps_timer)
+                    fps_count   = 0
+                    fps_timer   = now
 
-            # Vehicle detection on DETECTOR FRAME (faster)
-            results = self.vehicle.detect(detector_frame)
+                # ---- Resize for detection & display efficiency ----
+                h_orig, w_orig = original_frame.shape[:2]
+                scale = 1.0
+                if w_orig > RESIZE_WIDTH:
+                    scale = RESIZE_WIDTH / w_orig
+                    detector_frame = cv2.resize(original_frame, (RESIZE_WIDTH, int(h_orig * scale)))
+                else:
+                    detector_frame = original_frame
+                
+                self._last_scale = scale # Store for visualization
 
-            vehicle_count      = 0
-            plate_count        = 0
-            vehicle_detections = []   # for display
+                # Plate detection directly on DETECTOR FRAME (Single Stage)
+                plates_found = self.plate.detect(detector_frame)
 
-            if results and len(results[0].boxes) > 0:
-                vehicle_boxes = results[0].boxes[:MAX_VEHICLES_PER_FRAME]
-                vehicle_count = len(vehicle_boxes)
+                plate_count        = 0
+                plate_detections   = []   # for display
 
-                for box in vehicle_boxes:
-                    # Bbox in detector_frame coordinates
-                    sx1, sy1, sx2, sy2 = map(int, box.xyxy[0])
-                    
-                    # Scale back to original for high-res crop
-                    x1 = int(sx1 / scale)
-                    y1 = int(sy1 / scale)
-                    x2 = int(sx2 / scale)
-                    y2 = int(sy2 / scale)
-                    bbox_orig = (x1, y1, x2, y2)
+                if plates_found:
+                    for px1, py1, px2, py2, conf in plates_found:
+                        # Scale back to original for high-res crop
+                        x1 = int(px1 / scale)
+                        y1 = int(py1 / scale)
+                        x2 = int(px2 / scale)
+                        y2 = int(py2 / scale)
+                        bbox_orig = (x1, y1, x2, y2)
 
-                    vehicle_crop = safe_crop(original_frame, bbox_orig)
-                    if vehicle_crop is None: continue
+                        # Match / create session using Plate Bbox
+                        sid = self._match_session(bbox_orig)
+                        if not sid:
+                            sid = self._create_session(bbox_orig)
+                        else:
+                            self._update_session(sid, bbox_orig)
 
-                    # Define native crops coords regardless of condition for safety
-                    nx1, ny1, nx2, ny2 = x1, y1, x2, y2
+                        session = self.sessions[sid]
 
-                    # Match / create session (using original coords for consistency)
-                    sid = self._match_session(bbox_orig)
-                    if not sid:
-                        sid = self._create_session(bbox_orig)
-                    else:
-                        self._update_session(sid, bbox_orig)
-
-                    session = self.sessions[sid]
-
-                    # ---- Centroid line-crossing detection ----
-                    lx1, ly1, lx2, ly2 = self.line
-                    cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-                    
-                    # Signed cross product: tells which side of the line the centroid is on
-                    cross = (lx2 - lx1) * (cy - ly1) - (ly2 - ly1) * (cx - lx1)
-                    curr_side = 1 if cross > 0 else (-1 if cross < 0 else 0)
-                    prev_side = session.get("last_side")
-
-                    if (prev_side is not None and prev_side != 0 and curr_side != 0 and prev_side != curr_side):
-                        # Side changed -> line crossed
-                        crossed = "ENTRY" if prev_side < 0 and curr_side > 0 else "EXIT"
-                        if session.get("direction_crossed") is None:
-                            session["direction_crossed"] = crossed
-                            logging.info(f"[LINE CROSS] session={sid[:8]} direction={crossed} centroid=({cx},{cy})")
-                    
-                    session["last_side"] = curr_side
-
-                    # ---- Production-Level Optimization ----
-                    # - Draft Optimization Plan
-                    # - Optimize I/O (Eliminate per-frame disk writes for crops)
-                    # - Dynamic Inference Control (Skip plate detection on untracked/distant vehicles)
-                    # - Batching in OCRManager worker
-                    # - Main Loop Refactor (Decouple Display/UI from Processing)
-                    # Plate detection is expensive. Skip if we have enough candidates
-                    # or if the vehicle is not in a priority state.
-                    with self.ocr_manager.lock:
-                        candidates_count = len(session.get("candidates", []))
-                    
-                    should_detect_plate = False
-                    if candidates_count < 20:
-                        # Detect every N frames to save cycles
-                        if decoded_frames % (FRAME_SKIP + 1) == 0:
-                            should_detect_plate = True
-
-                    if should_detect_plate:
-                        # Native resolution coordinates for OCR cropping
-                        nx1, ny1, nx2, ny2 = (
-                            int(sx1 / scale), int(sy1 / scale),
-                            int(sx2 / scale), int(sy2 / scale)
-                        )
-                        vehicle_crop_native = safe_crop(original_frame, (nx1, ny1, nx2, ny2))
+                        # ---- Centroid line-crossing detection (Plate centroid) ----
+                        lx1, ly1, lx2, ly2 = self.line
+                        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
                         
-                        if vehicle_crop_native is not None:
-                            plates_native = self.plate.detect(vehicle_crop_native)
-                            for px1, py1, px2, py2, _pconf in plates_native:
-                                plate_crop = safe_crop(vehicle_crop_native, (px1, py1, px2, py2))
-                                if plate_crop is None: continue
-                                
+                        cross = (lx2 - lx1) * (cy - ly1) - (ly2 - ly1) * (cx - lx1)
+                        curr_side = 1 if cross > 0 else (-1 if cross < 0 else 0)
+                        prev_side = session.get("last_side")
+
+                        if (prev_side is not None and prev_side != 0 and curr_side != 0 and prev_side != curr_side):
+                            crossed = "ENTRY" if prev_side < 0 and curr_side > 0 else "EXIT"
+                            if session.get("direction_crossed") is None:
+                                session["direction_crossed"] = crossed
+                                logging.info(f"[LINE CROSS] session={sid[:8]} plate_centroid=({cx},{cy}) dir={crossed}")
+                        
+                        session["last_side"] = curr_side
+
+                        with self.ocr_manager.lock:
+                            candidates_count = len(session.get("candidates", []))
+                        
+                        if candidates_count < 20:
+                            plate_crop = safe_crop(original_frame, bbox_orig)
+                            if plate_crop is not None:
                                 # Higher resolution for OCR
-                                plate_crop = cv2.resize(plate_crop, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+                                plate_crop_ocr = cv2.resize(plate_crop, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
                                 
-                                # Buffer the crop (in memory) and enqueue for OCR
-                                self._save_plate_image(sid, plate_crop, vehicle_crop_native)
-                                self.ocr_manager.enqueue_plate(session, plate_crop)
-                    
-                    det_plates = []
-                    if should_detect_plate and 'plates_native' in locals():
-                        for px1, py1, px2, py2, _pconf in plates_native:
-                            # Map native plate coords -> detector_frame coords for display
-                            # Natives are relative to the vehicle_crop_native
-                            # px1 relative to nx1
-                            det_px1 = int((nx1 + px1) * scale)
-                            det_py1 = int((ny1 + py1) * scale)
-                            det_px2 = int((nx1 + px2) * scale)
-                            det_py2 = int((ny1 + py2) * scale)
-                            det_plates.append((det_px1, det_py1, det_px2, det_py2))
+                                # Context crop for "proof" (Expand plate box to show surroundings)
+                                h_orig, w_orig = original_frame.shape[:2]
+                                pad_h = int((y2 - y1) * 2.5) # pad around plate
+                                pad_w = int((x2 - x1) * 1.5)
+                                context_box = (
+                                    max(0, x1 - pad_w), max(0, y1 - pad_h),
+                                    min(w_orig, x2 + pad_w), min(h_orig, y2 + pad_h)
+                                )
+                                context_crop = safe_crop(original_frame, context_box)
 
-                    vehicle_detections.append({
-                        'bbox': (sx1, sy1, sx2, sy2),
-                        'sid': sid,
-                        'plates': det_plates,
-                    })
+                                # Buffer local crops
+                                self._save_plate_image(sid, plate_crop, context_crop)
+                                self.ocr_manager.enqueue_plate(session, plate_crop_ocr)
+                        
+                        plate_count += 1
+                        plate_detections.append({
+                            'bbox': (px1, py1, px2, py2), # detector frame coords
+                            'sid': sid,
+                            'conf': conf
+                        })
 
-            # Log frame summary every 10 decoded frames
-            if decoded_frames % 10 == 0:
-                logging.info(
-                    f"[FRAME {decoded_frames:05d}]  vehicles={vehicle_count}  "
-                    f"plates={plate_count}  active_sessions={len(self.sessions)}"
+                # Log frame summary every 10 decoded frames
+                if decoded_frames % 10 == 0:
+                    logging.info(
+                        f"[FRAME {decoded_frames:05d}]  plates={plate_count}  "
+                        f"active_sessions={len(self.sessions)}"
+                    )
+
+                # Cleanup expired sessions
+                self._cleanup_sessions()
+
+                # ---- Live inference window ----
+                if SHOW_LPR_WINDOW:
+                    display_frame = self._draw_inference_frame(
+                        detector_frame, plate_detections
+                    )
+
+                    # FPS badge (bottom-left)
+                    h_d, w_d = display_frame.shape[:2]
+                    cv2.putText(
+                        display_frame,
+                        f"FPS: {fps_display:.1f}",
+                        (8, h_d - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.50,
+                        (100, 255, 100), 1, cv2.LINE_AA
+                    )
+
+                    win_name = "LPR Live Inference"
+                    cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
+                    cv2.resizeWindow(win_name, min(w_d, 1280), min(h_d, 720))
+                    cv2.imshow(win_name, display_frame)
+                    if cv2.waitKey(1) & 0xFF == ord("q"):
+                        user_quit = True
+                        break          # user pressed Q → clean shutdown
+
+            # ── inner loop exited ──────────────────────────────────────
+
+            # Release the dead capture handle
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+
+            if user_quit:
+                logging.info("[WORKER] User quit — shutting down")
+                break                  # exit outer loop → shut down
+
+            # Finalize any active sessions before reconnecting so data is not lost
+            logging.info("[WORKER] Finalizing active sessions before reconnect …")
+            for sid in list(self.sessions.keys()):
+                self._finalize_session(sid)
+
+            # ── reconnect with exponential backoff ────────────────────
+            logging.warning(
+                f"[WORKER] Stream lost — reconnecting in {reconnect_delay}s …"
+            )
+            time.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2, MAX_RECONNECT_DELAY)
+
+            new_cap = open_capture(RTSP_URL)
+            if new_cap and new_cap.isOpened():
+                self.cap = new_cap
+                reconnect_delay = 5    # reset backoff on successful connect
+                logging.info("[WORKER] Reconnected — resuming frame loop")
+            else:
+                logging.error(
+                    f"[WORKER] Reconnect failed — will retry in {reconnect_delay}s"
                 )
+                # self.cap is already released; loop will try again
 
-            # Cleanup expired sessions
-            self._cleanup_sessions()
-
-            # ---- Live inference window ----
-            if SHOW_LPR_WINDOW:
-                display_frame = self._draw_inference_frame(
-                    detector_frame, vehicle_detections
-                )
-
-                # FPS badge (bottom-left)
-                h_d, w_d = display_frame.shape[:2]
-                cv2.putText(
-                    display_frame,
-                    f"FPS: {fps_display:.1f}",
-                    (8, h_d - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.50,
-                    (100, 255, 100), 1, cv2.LINE_AA
-                )
-
-                win_name = "LPR Live Inference"
-                cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
-                cv2.resizeWindow(win_name, min(w_d, 1280), min(h_d, 720))
-                cv2.imshow(win_name, display_frame)
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    break
-
-        # Finalize remaining sessions
+        # ── final shutdown ─────────────────────────────────────────────
         for sid in list(self.sessions.keys()):
             self._finalize_session(sid)
 
-        self.cap.release()
-        self.ocr_manager.stop() # Shut down background thread
+        self.ocr_manager.stop()        # Shut down background thread
         cv2.destroyAllWindows()
         logging.info("[WORKER] Stopped")
 

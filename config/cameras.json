@@ -1,10 +1,10 @@
 {
     "video/test1.mp4": {
         "line": {
-            "x1": 224,
-            "y1": 261,
-            "x2": 1265,
-            "y2": 286
+            "x1": 218,
+            "y1": 308,
+            "x2": 1193,
+            "y2": 330
         },
         "frame_width": 1280,
         "frame_height": 720
@@ -68,5 +68,75 @@
         },
         "frame_width": 3840,
         "frame_height": 2160
+    },
+    "video/twoplate.mp4": {
+        "line": {
+            "x1": 716,
+            "y1": 43,
+            "x2": 786,
+            "y2": 537
+        },
+        "frame_width": 1280,
+        "frame_height": 720
+    },
+    "video/double_line_test.mp4": {
+        "line": {
+            "x1": 3,
+            "y1": 532,
+            "x2": 1914,
+            "y2": 258
+        },
+        "frame_width": 1920,
+        "frame_height": 1080
+    },
+    "video/lorry1.mp4": {
+        "line": {
+            "x1": 6,
+            "y1": 704,
+            "x2": 2000,
+            "y2": 412
+        },
+        "frame_width": 2560,
+        "frame_height": 1440
+    },
+    "video/x1.mp4": {
+        "line": {
+            "x1": 1,
+            "y1": 472,
+            "x2": 1327,
+            "y2": 583
+        },
+        "frame_width": 1920,
+        "frame_height": 1080
+    },
+    "video/x2.mp4": {
+        "line": {
+            "x1": 1,
+            "y1": 472,
+            "x2": 1327,
+            "y2": 583
+        },
+        "frame_width": 1920,
+        "frame_height": 1080
+    },
+    "video/x3.mp4": {
+        "line": {
+            "x1": 1,
+            "y1": 472,
+            "x2": 1327,
+            "y2": 583
+        },
+        "frame_width": 1920,
+        "frame_height": 1080
+    },
+    "video/x4.mp4": {
+        "line": {
+            "x1": 1,
+            "y1": 472,
+            "x2": 1327,
+            "y2": 583
+        },
+        "frame_width": 1920,
+        "frame_height": 1080
     }
 }
