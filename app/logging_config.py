@@ -1,6 +1,7 @@
 import logging
 from logging.handlers import RotatingFileHandler
 import os
+from app.config import *
 
 def setup_logging(level="INFO"):
     os.makedirs("logs", exist_ok=True)
@@ -13,8 +14,10 @@ def setup_logging(level="INFO"):
         datefmt="%Y-%m-%d %H:%M:%S"
     )
 
+
+
     file_handler = RotatingFileHandler(
-        "logs/lpr.log", maxBytes=10_000_000, backupCount=5
+        f"logs/{LOG_FILE}", maxBytes=10_000_000, backupCount=5
     )
     file_handler.setFormatter(formatter)
 
