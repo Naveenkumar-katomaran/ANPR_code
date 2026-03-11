@@ -29,6 +29,8 @@ CAMERA_ID = os.getenv("CAMERA_ID")
 API_URL = os.getenv("API_URL")
 API_KEY = os.getenv("API_KEY")
 
+LOG_FILE = os.getenv("LOG_FILE","application.log")
+
 DUPLICATE_WINDOW_SECONDS = int(os.getenv("DUPLICATE_WINDOW_SECONDS", 30))
 
 VEHICLE_SESSION_TIMEOUT = int(os.getenv("VEHICLE_SESSION_TIMEOUT", 5))
