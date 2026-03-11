@@ -94,6 +94,7 @@ class CameraWorker:
             logging.info("[WORKER] Cleaned up leftover temp/ folder from previous run")
         os.makedirs("temp", exist_ok=True)
         os.makedirs("outputs/proofs", exist_ok=True)
+        os.makedirs("outputs/vehicles", exist_ok=True)
 
         # ---- Direction line ----
         # load_camera_line returns native coords + the resolution they were drawn at
@@ -153,7 +154,7 @@ class CameraWorker:
 
         for sid, session in self.sessions.items():
             iou = calculate_iou(bbox, session["bbox"])
-            if iou > 0.1 and iou > best_iou:
+            if iou > IOU_THRESHOLD and iou > best_iou:
                 best_iou = iou
                 best_match = sid
 
@@ -172,15 +173,23 @@ class CameraWorker:
         session["last_seen"] = time.time()
         session["bbox"] = bbox
 
-    def _save_plate_image(self, sid, plate_crop, vehicle_crop=None):
-        """Buffer plate crops in memory for the session.
-        Stops buffering once MAX_BATCH_IMAGES is reached.
+    def _save_plate_image(self, sid, plate_crop, original_frame, plate_conf):
+        """Buffer plate crops in memory for the session and track the best one.
+        Stops buffering once MAX_BATCH_IMAGES is reached, but continues updating 'best' images.
         """
         session = self.sessions.get(sid)
         if not session:
             return
 
-        # ---- Cap check ----
+        # ---- Track Best Images (unlimited by MAX_BATCH_IMAGES) ----
+        current_best_conf = session.get("best_buffered_conf", 0.0)
+        if plate_conf > current_best_conf:
+            session["best_buffered_conf"] = plate_conf
+            session["best_crop_img"] = plate_crop.copy()
+            session["best_proof_img"] = original_frame.copy()
+            logging.debug(f"[BEST UPDATED] session={sid[:8]} conf={plate_conf:.2f}")
+
+        # ---- Cap check for history buffering ----
         if session["frame_count"] >= MAX_BATCH_IMAGES:
             if session["frame_count"] == MAX_BATCH_IMAGES:
                 logging.info(f"[CAP REACHED] session={sid[:8]} limit={MAX_BATCH_IMAGES}")
@@ -190,10 +199,9 @@ class CameraWorker:
             session["crops"] = []
         
         session["frame_count"] += 1
-        # Store in memory
+        # Store in memory (limited)
         session["crops"].append({
             "plate": plate_crop,
-            "vehicle": vehicle_crop,
             "timestamp": time.time()
         })
 
@@ -245,12 +253,23 @@ class CameraWorker:
             return
 
         temp_dir = session["temp_dir"]
+        best_plate_img = session.get("best_crop_img")
+        best_proof_img = session.get("best_proof_img")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         def _cleanup():
             """Always remove temp folder, regardless of outcome."""
             if os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir, ignore_errors=True)
                 logging.debug(f"[TEMP CLEANED] {temp_dir}")
+
+        # ---- NEW: Collect session image anyway if enabled ----
+        if COLLECT_SESSION_IMAGE and best_proof_img is not None:
+            veh_name = f"vehicle_{sid[:8]}_{timestamp}.jpg"
+            veh_path = os.path.join("outputs/vehicles", veh_name)
+            cv2.imwrite(veh_path, best_proof_img)
+            session["collected_vehicle_image"] = veh_path
+            logging.info(f"[VEHICLE COLLECTED] {veh_path}")
 
         # ---- Direction gate ----
         if DIRECTION != "BOTH":
@@ -312,22 +331,17 @@ class CameraWorker:
         logging.info(f"[✅ FINALIZED] plate={plate} score={conf:.2f} session={sid[:8]}")
         
         # Save only the best results to disk to reduce I/O
-        crops = session.get("crops", [])
         plate_path = None
-        if crops:
-            # For now, we take the first buffered crop. In the future, we could pick sharpest.
-            best_item = crops[0] 
-            
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if best_plate_img is not None:
             plate_name = f"{plate}_{timestamp}.jpg"
             plate_path = os.path.join("outputs/plates", plate_name)
-            cv2.imwrite(plate_path, best_item["plate"])
+            cv2.imwrite(plate_path, best_plate_img)
             session["best_plate_image_path"] = plate_path
             
-            if STORE_SESSION_PROOF and best_item["vehicle"] is not None:
+            if STORE_SESSION_PROOF and best_proof_img is not None:
                 proof_name = f"proof_{sid[:8]}_{timestamp}.jpg"
                 proof_path = os.path.join("outputs/proofs", proof_name)
-                cv2.imwrite(proof_path, best_item["vehicle"])
+                cv2.imwrite(proof_path, best_proof_img)
                 session["session_proof_path"] = proof_path
 
         # Send to API
@@ -538,14 +552,9 @@ class CameraWorker:
                     fps_count   = 0
                     fps_timer   = now
 
-                # ---- Resize for detection & display efficiency ----
-                h_orig, w_orig = original_frame.shape[:2]
+                # No downscaling for detection - use original_frame directly
+                detector_frame = original_frame
                 scale = 1.0
-                if w_orig > RESIZE_WIDTH:
-                    scale = RESIZE_WIDTH / w_orig
-                    detector_frame = cv2.resize(original_frame, (RESIZE_WIDTH, int(h_orig * scale)))
-                else:
-                    detector_frame = original_frame
                 
                 self._last_scale = scale # Store for visualization
 
@@ -556,12 +565,7 @@ class CameraWorker:
                 plate_detections   = []   # for display
 
                 if plates_found:
-                    for px1, py1, px2, py2, conf in plates_found:
-                        # Scale back to original for high-res crop
-                        x1 = int(px1 / scale)
-                        y1 = int(py1 / scale)
-                        x2 = int(px2 / scale)
-                        y2 = int(py2 / scale)
+                    for x1, y1, x2, y2, conf in plates_found:
                         bbox_orig = (x1, y1, x2, y2)
 
                         # Match / create session using Plate Bbox
@@ -592,29 +596,19 @@ class CameraWorker:
                         with self.ocr_manager.lock:
                             candidates_count = len(session.get("candidates", []))
                         
-                        if candidates_count < 20:
+                        if candidates_count < TOTAL_CANDIDATES_COUNT:
                             plate_crop = safe_crop(original_frame, bbox_orig)
                             if plate_crop is not None:
-                                # Higher resolution for OCR
-                                plate_crop_ocr = cv2.resize(plate_crop, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+                                # Use actual frame crop for OCR (removed 2.0x resize as per user requirement)
+                                plate_crop_ocr = plate_crop
                                 
-                                # Context crop for "proof" (Expand plate box to show surroundings)
-                                h_orig, w_orig = original_frame.shape[:2]
-                                pad_h = int((y2 - y1) * 2.5) # pad around plate
-                                pad_w = int((x2 - x1) * 1.5)
-                                context_box = (
-                                    max(0, x1 - pad_w), max(0, y1 - pad_h),
-                                    min(w_orig, x2 + pad_w), min(h_orig, y2 + pad_h)
-                                )
-                                context_crop = safe_crop(original_frame, context_box)
-
                                 # Buffer local crops
-                                self._save_plate_image(sid, plate_crop, context_crop)
+                                self._save_plate_image(sid, plate_crop, original_frame, conf)
                                 self.ocr_manager.enqueue_plate(session, plate_crop_ocr)
                         
                         plate_count += 1
                         plate_detections.append({
-                            'bbox': (px1, py1, px2, py2), # detector frame coords
+                            'bbox': (x1, y1, x2, y2), # actual frame coords
                             'sid': sid,
                             'conf': conf
                         })

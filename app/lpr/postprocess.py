@@ -2,6 +2,7 @@ import re
 import logging
 from collections import Counter
 from typing import List, Optional, Tuple, Dict, Any
+from app.config import *
 
 # -------------------------------------------------
 # Indian plate format

@@ -138,5 +138,15 @@
         },
         "frame_width": 1920,
         "frame_height": 1080
+    },
+    "video/test7march.mp4": {
+        "line": {
+            "x1": 6,
+            "y1": 1182,
+            "x2": 3822,
+            "y2": 1416
+        },
+        "frame_width": 3840,
+        "frame_height": 2160
     }
 }

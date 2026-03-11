@@ -35,6 +35,7 @@ VEHICLE_SESSION_TIMEOUT = int(os.getenv("VEHICLE_SESSION_TIMEOUT", 5))
 MAX_SESSION_DURATION_SECONDS = int(os.getenv("MAX_SESSION_DURATION_SECONDS", 30))
 MIN_FRAMES_BEFORE_DECISION = int(os.getenv("MIN_FRAMES_BEFORE_DECISION", 3))
 MIN_OCR_CONFIDENCE = float(os.getenv("MIN_OCR_CONFIDENCE", 0.6))
+IOU_THRESHOLD = float(os.getenv("IOU_THRESHOLD", 0.3))
 
 
 FRAME_SKIP = int(os.getenv("FRAME_SKIP", 3))              # Decode 1 frame every N
@@ -47,9 +48,10 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 DEVICE = os.getenv("DEVICE", "cpu").lower()  # "cpu" or "cuda"
 STORE_SESSION_PROOF = os.getenv("STORE_SESSION_PROOF", "True").lower() in ["1", "true", "yes"]
+COLLECT_SESSION_IMAGE = os.getenv("COLLECT_SESSION_IMAGE", "False").lower() in ["1", "true", "yes"]
 
 
-
+TOTAL_CANDIDATES_COUNT = int(os.getenv("TOTAL_CANDIDATES_COUNT", 20))
 
 VALIDATE_INDIAN_PLATE = os.getenv("VALIDATE_INDIAN_PLATE", "True").lower() in ["1", "true", "yes"]
 

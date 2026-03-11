@@ -22,3 +22,11 @@ let me know
 
 
 
+
+prompt 2
+
+
+one thing we need to ensure is ?
+
+is we are performing ocr in original actual frame receiving or cropped image from the model ?
+
