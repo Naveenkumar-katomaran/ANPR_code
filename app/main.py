@@ -50,53 +50,6 @@ def license_watchdog():
 watchdog_thread = threading.Thread(target=license_watchdog, daemon=True, name="LicenseWatchdog")
 watchdog_thread.start()
 
-# ============================================================
-# Camera Worker – initialized inside lifespan handler below
-# ============================================================
-
-# # ============================================================
-# # Startup Event
-# # ============================================================
-# @app.on_event("startup")
-# def startup_event():
-#     """
-#     FastAPI startup sequence:
-
-#     1. Perform license validation (blocking)
-#     2. Set LICENSE_EXPIRES_AT for watchdog
-#     3. Start CameraWorker in background daemon thread
-#     """
-#     global LICENSE_EXPIRES_AT
-
-#     logging.info("✅ Performing license validation...")
-
-#     try:
-#         license_data = verify_license()
-#         expires_at_str = license_data.get("expires_at")
-#         LICENSE_EXPIRES_AT = datetime.fromisoformat(expires_at_str.replace("Z", "+00:00"))
-
-#         # logging.info(f"License valid. Expires at: {LICENSE_EXPIRES_AT.isoformat()}")
-#         logging.info(f"License valid")
-#         logging.info(f"Licensed user: {license_data.get('user_name')}")
-#     except LicenseError as e:
-#         logging.error(f"❌ LICENSE ERROR: {e}")
-#         sys.exit(1)
-
-#     # Start CameraWorker in background daemon thread
-#     logging.info("Starting CameraWorker background thread...")
-
-#     thread = threading.Thread(
-#         target=worker.run,
-#         daemon=True,
-#         name="CameraWorkerThread"
-#     )
-
-#     thread.start()
-
-#     logging.info("CameraWorker thread started successfully.")
-
-
-
 
 
 worker = CameraWorker()

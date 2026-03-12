@@ -1,5 +1,6 @@
 import cv2
 import os
+import numpy as np
 import logging
 import time
 import json
@@ -11,7 +12,7 @@ from datetime import datetime
 import torch
 
 from app.config import *
-from app.config import load_camera_line
+from app.config import load_camera_line, load_camera_roi
 # from app.detection.vehicle_detector import VehicleDetector
 from app.detection.plate_detector import PlateDetector
 from app.detection.ocr_manager import OCRManager
@@ -65,6 +66,9 @@ class CameraWorker:
         device = DEVICE
         logging.info(f"[DEVICE] Using {device}")
 
+
+
+        #notes
         # Optimization: Set torch threads if running on CPU
         if device == "cpu":
             torch.set_num_threads(os.cpu_count() or 4)
@@ -116,6 +120,19 @@ class CameraWorker:
             f"native_line=({x1},{y1})-({x2},{y2}) @ {native_w}×{native_h}  "
             f"→ scaled_line=({self.line[0]},{self.line[1]})-({self.line[2]},{self.line[3]}) @ {actual_w}×{actual_h}"
         )
+
+        # ---- ROI (Region of Interest) ----
+        roi_pts, r_native_w, r_native_h = load_camera_roi(RTSP_URL)
+        if roi_pts and r_native_w > 0 and r_native_h > 0:
+            rsx = actual_w / r_native_w
+            rsy = actual_h / r_native_h
+            self.roi_poly = np.array([
+                [int(p[0] * rsx), int(p[1] * rsy)] for p in roi_pts
+            ], dtype=np.int32)
+            logging.info(f"[ROI] Loaded ROI with {len(roi_pts)} points scaled to {actual_w}x{actual_h}")
+        else:
+            self.roi_poly = None
+            logging.info("[ROI] No valid ROI configured for this source.")
 
     # =====================================================
     # SESSION MANAGEMENT
@@ -502,6 +519,17 @@ class CameraWorker:
         cv2.putText(display, stats, (6, 24), FONT, FONT_MD,
                     (0, 255, 120), THICK_SM, cv2.LINE_AA)
 
+        # ---- ROI Overlay ----
+        if self.roi_poly is not None:
+            s = getattr(self, '_last_scale', 1.0)
+            scaled_roi = (self.roi_poly * s).astype(np.int32)
+            cv2.polylines(display, [scaled_roi], isClosed=True, color=(0, 255, 255), thickness=2)
+            
+            # Sublte translucent fill
+            roi_mask = np.zeros_like(display)
+            cv2.fillPoly(roi_mask, [scaled_roi], (0, 100, 100))
+            cv2.addWeighted(display, 1.0, roi_mask, 0.2, 0, display)
+
         return display
 
     # =====================================================
@@ -567,6 +595,13 @@ class CameraWorker:
                 if plates_found:
                     for x1, y1, x2, y2, conf in plates_found:
                         bbox_orig = (x1, y1, x2, y2)
+                        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+
+                        # ---- ROI Filtering ----
+                        if self.roi_poly is not None:
+                            is_inside = cv2.pointPolygonTest(self.roi_poly, (float(cx), float(cy)), False)
+                            if is_inside < 0:
+                                continue # Centroid outside ROI
 
                         # Match / create session using Plate Bbox
                         sid = self._match_session(bbox_orig)

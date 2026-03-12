@@ -115,3 +115,28 @@ def load_camera_line(source_url: str):
         f"native_res={native_w}×{native_h}"
     )
     return coords
+
+def load_camera_roi(source_url: str):
+    """
+    Load the ROI polygon for *source_url* from config/cameras.json.
+
+    Returns (points, native_w, native_h) where points is a list of (x, y).
+    Scaling is handled by the caller.
+    """
+    if not os.path.exists(_CAMERAS_JSON):
+        return None, 0, 0
+
+    with open(_CAMERAS_JSON) as f:
+        data = json.load(f)
+
+    if source_url not in data or "roi" not in data[source_url]:
+        return None, 0, 0
+
+    entry = data[source_url]
+    roi_raw = entry["roi"]
+    points = [(int(p["x"]), int(p["y"])) for p in roi_raw]
+    native_w = int(entry.get("frame_width", 1))
+    native_h = int(entry.get("frame_height", 1))
+
+    print(f"[CONFIG] ROI loaded for '{source_url}' with {len(points)} points.")
+    return points, native_w, native_h
